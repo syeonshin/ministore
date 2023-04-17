@@ -49,76 +49,60 @@ impl SimpleFakeDevice {
 
 impl BlockDevice for SimpleFakeDevice {
     fn write(&mut self, lba: u64, num_blocks: u64, buffer: Vec<DataBlock>) -> Result<(), String> {
-        if self.is_valid_range(lba, num_blocks) == false {
-            return Err("Invalid lba ranges".to_string());
-        }
-
-        if (buffer.len() as u64) < num_blocks {
-            return Err("Not enough buffers provided".to_string());
-        }
-
-        for offset in 0..num_blocks {
-            let current_lba = (lba + offset) as usize;
-            self.data.0[current_lba] = buffer[offset as usize];
-        }
-
-        Ok(())
+       if self.is_valid_range(lba, num_blocks) == false {
+            return Err("invalid lba range to write".to_string())
+       }
+       if buffer.len() != num_blocks as usize {
+            return Err("Number of blocks to write in buffer does not match with requested num_blocks".to_string())
+       }
+       for block in 0..num_blocks {
+            self.data.0[lba as usize] = buffer[block as usize];
+            lba = (lba + 1) as u64;
+       }
+       Ok(())
     }
-
-    fn read(&mut self, lba: u64, num_blocks: u64) -> Result<Vec<DataBlock>, String> {
-        if self.is_valid_range(lba, num_blocks) == false {
-            return Err("Invalid lba ranges".to_string());
-        }
-
-        let mut read_data = Vec::new();
-        for offset in 0..num_blocks {
-            let current_lba = (lba + offset) as usize;
-            read_data.push(self.data.0[current_lba].clone());
-        }
-
-        Ok(read_data)
-    }
-
     fn info(&self) -> &DeviceInfo {
-        &self.device_info
+        return &self.device_info
     }
+    fn read(&mut self, lba: u64, num_blocks: u64) -> Result<Vec<DataBlock>, String> {
+       if self.is_valid_range(lba, num_blocks) == false {
+            return Err("invalid lba range to read".to_string());
+       }
+       let mut readData = Vec::new();
+       for block in 0..num_blocks {
+            let currentLba = lba + block;
+            readData.push(self.data.0[currentLba as usize].clone());
+       }
+       Ok(readData)
+    }
+    fn flush(&mut self) -> Result<(), String> {
+        let fileName : &String = &self.device_info.name();
+        let path = Path::new(&fileName);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path);
 
+        // write data to file
+        Ok(())
+    }
     fn load(&mut self) -> Result<(), String> {
-        let filename = self.device_info.name().clone();
-        let path = Path::new(&filename);
+        let fileName : &String = &self.device_info.name();
+        let path = Path::new(&fileName);
 
-        if !path.exists() {
-            return Err("No files to load".to_string());
+        if path.exists() == false {
+            return Err("No file exists".to_string())
         }
 
         let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
+                    .read(true)
+                    .create(true)
+                    .open(&path);
 
-        let loaded_data = bincode::deserialize_from(&mut file).map_err(|e| e.to_string())?;
-        self.data = loaded_data;
+        // load data from file 
 
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), String> {
-        let filename = self.device_info.name().clone();
-        let path = Path::new(&filename);
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
-
-        bincode::serialize_into(&mut file, &self.data).map_err(|e| e.to_string())?;
-
-        Ok(())
+       Ok(()) 
     }
 }
 
@@ -136,7 +120,7 @@ mod tests {
             )
             .expect("Failed to create fake device");
 
-            let mut test_data = Data::new(1024);
+            let mut test_data: Data = Data::new(1024);
             for lba in 0..1024 {
                 test_data.0[lba] = DataBlock([lba as u8; BLOCK_SIZE]);
             }
