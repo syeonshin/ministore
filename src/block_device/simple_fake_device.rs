@@ -56,8 +56,8 @@ impl BlockDevice for SimpleFakeDevice {
             return Err("Number of blocks to write in buffer does not match with requested num_blocks".to_string())
        }
        for block in 0..num_blocks {
-            self.data.0[lba as usize] = buffer[block as usize];
-            lba = (lba + 1) as u64;
+            let cur_lba = block + lba;
+            self.data.0[cur_lba as usize] = buffer[block as usize];
        }
        Ok(())
     }

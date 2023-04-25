@@ -1,7 +1,8 @@
 use super::{data_type::DataBlock, device_info::DeviceInfo, BlockDevice};
 use crate::block_device::data_type::{BLOCK_SIZE, UNMAP_BLOCK};
 use std::io::{Seek, Write};
-use std::os::fd::AsRawFd;
+//use std::os::fd::AsRawFd 를 못찾음
+use std::os::unix::io::AsRawFd;
 
 const URING_SIZE: u32 = 8;
 
@@ -17,27 +18,29 @@ impl IoUringFakeDevice {
         let device_info = DeviceInfo::new(name, size)?;
         let ring = io_uring::IoUring::new(URING_SIZE).map_err(|e| e.to_string())?;
 
-        let filename = device_info.name();
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(filename)
-            .map_err(|e| e.to_string())?;
-
+        let file_name: &str = device_info.name();
+        let mut fd = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(file_name)
+                    .map_err(|e| e.to_string())?;
+        // device info 의 block 개수만큼 초기화
         for lba in 0..device_info.num_blocks() {
-            file.seek(std::io::SeekFrom::Start(lba * BLOCK_SIZE as u64))
+            fd.seek(std::io::SeekFrom::Start(lba * BLOCK_SIZE as u64))
                 .map_err(|e| e.to_string())?;
-            file.write_all(&UNMAP_BLOCK.0).map_err(|e| e.to_string())?;
-        }
+            fd.write_all(&UNMAP_BLOCK.0).map_err(|e| e.to_string())?;
 
+        }
+        // create files to write/read
         Ok(Self { device_info, ring })
     }
 
     fn is_valid_range(&self, lba: u64, num_blocks: u64) -> bool {
-        if num_blocks == 0 || lba + num_blocks > self.device_info.num_blocks() {
-            false
-        } else {
-            true
+        if lba + num_blocks > self.device_info.num_blocks() {
+            return false
+        }
+        else {
+            return true
         }
     }
 }
@@ -49,38 +52,27 @@ impl BlockDevice for IoUringFakeDevice {
     }
 
     fn write(&mut self, lba: u64, num_blocks: u64, buffer: Vec<DataBlock>) -> Result<(), String> {
+        // check lba range
         if self.is_valid_range(lba, num_blocks) == false {
-            return Err("Invalid lba ranges".to_string());
+            return Err("The number of blocks does not match with buffer".to_string())
         }
-
-        if (buffer.len() as u64) < num_blocks {
-            return Err("Not enough buffers provided".to_string());
+        if buffer.len() as u64 != num_blocks {
+            return Err("The number of blocks does not match with buffer".to_string())
         }
-
-        let filename = self.device_info.name();
+        // make buffer to write
+        let file_name = self.device_info.name();
+        //이거랑 무슨 차이? let fd = std::fs::File::open(file_name);
         let fd = std::fs::OpenOptions::new()
             .write(true)
-            .open(filename)
+            .open(file_name)
             .map_err(|e| e.to_string())?;
 
-        let mut flatten: Vec<u8> = buffer
-            .iter()
-            .map(|d| d.0.to_vec())
-            .into_iter()
-            .flatten()
-            .collect();
-
+        let bytes_ptr: *const u8 = buffer.as_ptr() as *const u8;
         let write_e = io_uring::opcode::Write::new(
             io_uring::types::Fd(fd.as_raw_fd()),
-            flatten.as_mut_ptr(),
-            flatten.len() as _,
-        )
-        .offset(
-            (lba * BLOCK_SIZE as u64)
-                .try_into()
-                .map_err(|e| format!("{:?}", e))?,
-        )
-        .build();
+            bytes_ptr , (buffer.len() * std::mem::size_of::<DataBlock>()) as u32)
+            .offset((lba * BLOCK_SIZE as u64) as i64) // offset 문서에서는 offset: u64인데 왜 여긴 i64...?
+            .build();
 
         unsafe {
             self.ring
@@ -89,71 +81,36 @@ impl BlockDevice for IoUringFakeDevice {
                 .map_err(|e| e.to_string())?;
         }
 
-        self.ring.submit_and_wait(1).map_err(|e| e.to_string())?;
+        self.ring
+            .submit_and_wait(1)
+            .expect("failed to submit");
 
-        if let Some(cqe) = self.ring.completion().next() {
-            let result = cqe.result();
-            if result == 0 {
+        if let Some(cqe) = self.ring.completion().next(){
+            if cqe.result() == 0 {
                 Ok(())
-            } else {
-                Err(format!("Write failed: err:{}", cqe.result()))
             }
-        } else {
-            Err(format!("Cannot get completion"))
+            else{
+                Err("Write Completion Failed".to_string())
+            }
+        }
+        else{
+            Err("Write Completion Failed".to_string())
         }
     }
 
     fn read(&mut self, lba: u64, num_blocks: u64) -> Result<Vec<DataBlock>, String> {
         if self.is_valid_range(lba, num_blocks) == false {
-            return Err("Invalid lba ranges".to_string());
+            return Err("The number of blocks does not match with buffer".to_string())
         }
-
-        let filename = self.device_info.name();
+        let file_name = self.device_info.name();
         let fd = std::fs::OpenOptions::new()
-            .read(true)
-            .open(filename)
-            .map_err(|e| e.to_string())?;
+                    .read(true)
+                    .open(file_name)
+                    .map_err(|e| e.to_string())?; // ? 의 역할은?
 
-        let size = BLOCK_SIZE * num_blocks as usize;
-        let mut flatten_buf = vec![0u8; size];
-        let read_e = io_uring::opcode::Read::new(
-            io_uring::types::Fd(fd.as_raw_fd()),
-            flatten_buf.as_mut_ptr(),
-            flatten_buf.len() as _,
-        )
-        .offset(
-            (lba * BLOCK_SIZE as u64)
-                .try_into()
-                .map_err(|e| format!("{:?}", e))?,
-        )
-        .build();
-
-        unsafe {
-            self.ring
-                .submission()
-                .push(&read_e)
-                .map_err(|e| e.to_string())?;
-        }
-
-        self.ring.submit_and_wait(1).map_err(|e| e.to_string())?;
-
-        if let Some(cqe) = self.ring.completion().next() {
-            let result = cqe.result();
-            if result == 0 {
-                let mut buffer: Vec<DataBlock> = Vec::new();
-                for chunk in flatten_buf.chunks_exact(BLOCK_SIZE) {
-                    let mut block = [0u8; BLOCK_SIZE];
-                    block.copy_from_slice(chunk);
-                    buffer.push(DataBlock(block));
-                }
-
-                Ok(buffer)
-            } else {
-                Err(format!("Write failed: err:{}", cqe.result()))
-            }
-        } else {
-            Err(format!("Cannot get completion"))
-        }
+        
+        let temp = Vec::new();
+        Ok(temp)
     }
     fn load(&mut self) -> Result<(), String> {
         // Do nothing as data will be read from the file
@@ -196,7 +153,7 @@ mod tests {
         // Write data to the file
         {
             let mut buf: [u8; 1024] = [0xA; 1024];
-            let write_e =
+            let write_e: io_uring::squeue::Entry =
                 opcode::Write::new(types::Fd(fd.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _)
                     .build();
 

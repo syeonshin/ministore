@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn create_block_device_with_unaligned_size_should_fail() {
-        for_each_block_device_type(|device_type| {
+        for_each_block_device_type(|device_type: BlockDeviceType| {
             let device = create_block_device(
                 device_type,
                 "block_device_should_provide_correct_device_info".to_string(),
