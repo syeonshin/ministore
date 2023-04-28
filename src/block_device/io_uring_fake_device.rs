@@ -1,3 +1,4 @@
+use super::simple_fake_device::Data;
 use super::{data_type::DataBlock, device_info::DeviceInfo, BlockDevice};
 use crate::block_device::data_type::{BLOCK_SIZE, UNMAP_BLOCK};
 use std::io::{Seek, Write};
@@ -67,10 +68,13 @@ impl BlockDevice for IoUringFakeDevice {
             .open(file_name)
             .map_err(|e| e.to_string())?;
 
+        // write할 내용이 담긴 Vec<DataBlock> buffer를 *const u8로 변경
         let bytes_ptr: *const u8 = buffer.as_ptr() as *const u8;
-        let write_e = io_uring::opcode::Write::new(
-            io_uring::types::Fd(fd.as_raw_fd()),
-            bytes_ptr , (buffer.len() * std::mem::size_of::<DataBlock>()) as u32)
+        let write_e = 
+            io_uring::opcode::Write::new(
+                io_uring::types::Fd(fd.as_raw_fd()),
+                bytes_ptr,
+                (buffer.len() * std::mem::size_of::<DataBlock>()) as u32)
             .offset((lba * BLOCK_SIZE as u64) as i64) // offset 문서에서는 offset: u64인데 왜 여긴 i64...?
             .build();
 
@@ -107,10 +111,42 @@ impl BlockDevice for IoUringFakeDevice {
                     .read(true)
                     .open(file_name)
                     .map_err(|e| e.to_string())?; // ? 의 역할은?
-
+ 
+        let size = num_blocks as usize * BLOCK_SIZE;
+        let mut bufferToRead = vec![0u8; size];
+        let read_e = 
+            io_uring::opcode::Read::new(
+                io_uring::types::Fd(fd.as_raw_fd()),
+                bufferToRead.as_mut_ptr(), // 이 buffer를 넘겨서 여기에 값을 채워 오려고 as_mut_ptr()사용
+                bufferToRead.len() as u32)
+            .offset((lba * BLOCK_SIZE as u64) as i64)
+            .build();
         
-        let temp = Vec::new();
-        Ok(temp)
+        unsafe {
+            self.ring.submission()
+                    .push(&read_e)
+                    .map_err(|e| e.to_string())?;
+        }
+        self.ring.submit_and_wait(1)
+                 .map_err(|e| e.to_string())?;
+
+        if let Some(cqe) = self.ring.completion().next(){
+            if cqe.result() == 0 {
+                let mut read_buffer = Vec::new();
+                for data_block in bufferToRead.chunks_exact(BLOCK_SIZE){
+                    let mut block = [0xfu8;BLOCK_SIZE];
+                    block.copy_from_slice(data_block);
+                    read_buffer.push(DataBlock(block));
+                }
+                Ok(read_buffer)
+            }
+            else {
+                Err("Read Coimpletion Failed".to_string())
+            }
+        }   
+        else {
+            Err("Read completion failed".to_string())
+        }     
     }
     fn load(&mut self) -> Result<(), String> {
         // Do nothing as data will be read from the file
